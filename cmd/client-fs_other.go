@@ -1,4 +1,4 @@
-// +build linux
+// +build !linux
 
 /*
  * Minio Client (C) 2015 Minio, Inc.
@@ -18,23 +18,23 @@
 
 package cmd
 
-import (
-	"github.com/rjeczalik/notify"
-)
+import "github.com/rjeczalik/notify"
 
 var (
 	// EventTypePut contains the notify events that will cause a put
-	EventTypePut = []notify.Event{notify.InCloseWrite | notify.InMovedTo}
+	EventTypePut = []notify.Event{notify.Create, notify.Write, notify.Rename}
 	// EventTypeDelete contains the notify events that will cause a delete
-	EventTypeDelete = []notify.Event{notify.InDelete | notify.InDeleteSelf | notify.InMovedFrom}
+	EventTypeDelete = []notify.Event{notify.Remove}
 )
 
 // IsPutEvent checks if the event returned is a put event
 func IsPutEvent(event notify.Event) bool {
 	switch event {
-	case notify.InCloseWrite:
+	case notify.Create:
 		return true
-	case notify.InMovedTo:
+	case notify.Rename:
+		return true
+	case notify.Write:
 		return true
 	}
 
@@ -44,11 +44,7 @@ func IsPutEvent(event notify.Event) bool {
 // IsDeleteEvent checks if the event returned is a delete event
 func IsDeleteEvent(event notify.Event) bool {
 	switch event {
-	case notify.InDelete:
-		return true
-	case notify.InDeleteSelf:
-		return true
-	case notify.InMovedFrom:
+	case notify.Remove:
 		return true
 	}
 
