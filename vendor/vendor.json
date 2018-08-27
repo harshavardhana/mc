@@ -134,10 +134,10 @@
 			"revisionTime": "2018-07-11T12:25:12Z"
 		},
 		{
-			"checksumSHA1": "GTO2Gi65SvrlN6xOVQykGuoZ8fc=",
+			"checksumSHA1": "L8mRj81FEcz8GJ28Ef1nyTgGfhc=",
 			"path": "github.com/minio/minio/pkg/madmin",
-			"revision": "b2d44edc2659ddbffa6ebd0006bc0b1fbff60de3",
-			"revisionTime": "2018-08-17T23:03:41Z"
+			"revision": "95fc517d851735129370f711df24db50cac80bc5",
+			"revisionTime": "2018-08-27T21:57:59Z"
 		},
 		{
 			"checksumSHA1": "flg07CqTxM9togozKRQiJugao4s=",
