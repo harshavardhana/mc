@@ -79,6 +79,10 @@ func removeHost(alias string) {
 	fatalIf(err.Trace(globalMCConfigVersion), "Unable to load config version `"+globalMCConfigVersion+"`.")
 
 	// Remove host.
+	_, ok := conf.Hosts[alias]
+	if !ok {
+		fatalIf(errInvalidAliasedURL(alias), "No such alias `"+alias+"` found.")
+	}
 	delete(conf.Hosts, alias)
 
 	err = saveMcConfig(conf)

@@ -129,7 +129,7 @@ func (al aliasComplete) Predict(a complete.Args) (prediction []string) {
 	arg := a.Last
 	for alias := range conf.Hosts {
 		if strings.HasPrefix(alias, arg) {
-			prediction = append(prediction, alias+"/")
+			prediction = append(prediction, alias)
 		}
 	}
 
@@ -162,9 +162,11 @@ var completeCmds = map[string]complete.Predictor{
 	"/mb":  aliasCompleter,
 	"/sql": s3Completer,
 
-	"/admin/info":       aliasCompleter,
-	"/admin/heal":       s3Completer,
-	"/admin/credential": aliasCompleter,
+	"/admin/info/server": aliasCompleter,
+	"/admin/info/cpu":    aliasCompleter,
+	"/admin/info/mem":    aliasCompleter,
+	"/admin/heal":        s3Completer,
+	"/admin/credential":  aliasCompleter,
 
 	"/admin/config/get": aliasCompleter,
 	"/admin/config/set": aliasCompleter,
