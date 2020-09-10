@@ -19,6 +19,7 @@ package cmd
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path"
@@ -41,6 +42,7 @@ import (
 	"github.com/minio/minio-go/v7/pkg/encrypt"
 	"github.com/minio/minio-go/v7/pkg/lifecycle"
 	"github.com/minio/minio-go/v7/pkg/replication"
+	"github.com/minio/minio/pkg/console"
 )
 
 // filesystem client
@@ -225,49 +227,33 @@ func (f *fsClient) Watch(ctx context.Context, options WatchOptions) (*WatchObjec
 func preserveAttributes(fd *os.File, attr map[string]string) *probe.Error {
 	if val, ok := attr["mode"]; ok {
 		mode, e := strconv.ParseUint(val, 0, 32)
-		if e != nil {
-			return probe.NewError(e)
-		}
-
-		// Attempt to change the file mode.
-		if e := fd.Chmod(os.FileMode(mode)); e != nil {
-			return probe.NewError(e)
+		if e == nil {
+			// Attempt to change the file mode.
+			if e = fd.Chmod(os.FileMode(mode)); e != nil {
+				return probe.NewError(e)
+			}
 		}
 	}
 
 	var uid, gid int
-	var gidExists, uidExists bool
 	var e error
 	if val, ok := attr["uid"]; ok {
 		uid, e = strconv.Atoi(val)
 		if e != nil {
-			return probe.NewError(e)
+			uid = -1
 		}
-		uidExists = true
 	}
 
 	if val, ok := attr["gid"]; ok {
 		gid, e = strconv.Atoi(val)
 		if e != nil {
-			return probe.NewError(e)
+			gid = -1
 		}
-		gidExists = true
 	}
 
 	// Attempt to change the owner.
-	if gidExists && uidExists {
-		if e := fd.Chown(uid, gid); e != nil {
-			return probe.NewError(e)
-		}
-	} else if uidExists {
-		if e := fd.Chown(uid, -1); e != nil {
-			return probe.NewError(e)
-		}
-
-	} else {
-		if e := fd.Chown(-1, gid); e != nil {
-			return probe.NewError(e)
-		}
+	if e = fd.Chown(uid, gid); e != nil {
+		return probe.NewError(e)
 	}
 
 	return nil
@@ -317,9 +303,9 @@ func (f *fsClient) put(ctx context.Context, reader io.Reader, size int64, meta m
 			tmpFile.Close()
 			return 0, probe.NewError(e)
 		}
-		if err := preserveAttributes(tmpFile, attr); err != nil {
-			tmpFile.Close()
-			return 0, err.Trace(objectPath)
+		err := preserveAttributes(tmpFile, attr)
+		if err != nil {
+			console.Println(console.Colorize("Error", fmt.Sprintf("unable to preserve attributes, continuing to copy the content %s\n", err.ToGoError())))
 		}
 	}
 
@@ -370,28 +356,42 @@ func (f *fsClient) put(ctx context.Context, reader io.Reader, size int64, meta m
 	}
 
 	if len(attr) != 0 && preserve {
-		var atime, mtime int64
-		var e error
+		var atime, mtime syscall.Timespec
 		var atimeChanged, mtimeChanged bool
 		if val, ok := attr["atime"]; ok {
-			atime, e = strconv.ParseInt(val, 10, 64)
+			vals := strings.SplitN(val, "#", 2)
+			atim, e := strconv.ParseInt(vals[0], 10, 64)
 			if e != nil {
 				return totalWritten, probe.NewError(e)
 			}
-			atimeChanged = true
+			atime.Sec = atim
+			if len(vals) == 2 {
+				atimnsec, e := strconv.ParseInt(vals[1], 10, 64)
+				if e != nil {
+					return totalWritten, probe.NewError(e)
+				}
+				atime.Nsec = atimnsec
+			}
 		}
-
 		if val, ok := attr["mtime"]; ok {
-			mtime, e = strconv.ParseInt(val, 10, 64)
+			vals := strings.SplitN(val, "#", 2)
+			mtim, e := strconv.ParseInt(vals[0], 10, 64)
 			if e != nil {
 				return totalWritten, probe.NewError(e)
 			}
-			mtimeChanged = true
+			mtime.Sec = mtim
+			if len(vals) == 2 {
+				mtimnsec, e := strconv.ParseInt(vals[1], 10, 64)
+				if e != nil {
+					return totalWritten, probe.NewError(e)
+				}
+				mtime.Nsec = mtimnsec
+			}
 		}
 
 		// Attempt to change the access and modify time
 		if atimeChanged && mtimeChanged {
-			if e := os.Chtimes(objectPath, time.Unix(atime, 0), time.Unix(mtime, 0)); e != nil {
+			if e := os.Chtimes(objectPath, time.Unix(atime.Unix()), time.Unix(mtime.Unix())); e != nil {
 				return totalWritten, probe.NewError(e)
 			}
 		}
@@ -600,9 +600,7 @@ func readDir(dirname string) ([]os.FileInfo, error) {
 	if e != nil {
 		return nil, e
 	}
-	if e = f.Close(); e != nil {
-		return nil, e
-	}
+	defer f.Close()
 	sort.Sort(byDirName(list))
 	return list, nil
 }
