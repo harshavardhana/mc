@@ -942,11 +942,12 @@ func mainMirror(cliCtx *cli.Context) error {
 		case <-ctx.Done():
 			return exitStatus(globalErrorExitStatus)
 		default:
-			if errorDetected := runMirror(ctx, cancelMirror, srcURL, tgtURL, cliCtx, encKeyDB); errorDetected {
-				if cliCtx.Bool("multi-master") || cliCtx.Bool("active-active") {
-					time.Sleep(2 * time.Second)
-					continue
-				}
+			errorReturned := runMirror(ctx, cancelMirror, srcURL, tgtURL, cliCtx, encKeyDB)
+			if cliCtx.Bool("multi-master") || cliCtx.Bool("active-active") {
+				time.Sleep(2 * time.Second)
+				continue
+			}
+			if errorReturned {
 				return exitStatus(globalErrorExitStatus)
 			}
 			return nil

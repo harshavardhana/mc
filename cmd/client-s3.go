@@ -786,7 +786,7 @@ func (c *S3Client) Watch(ctx context.Context, options WatchOptions) (*WatchObjec
 			for notificationInfo := range eventsCh {
 				if notificationInfo.Err != nil {
 					var perr *probe.Error
-					if nErr, ok := notificationInfo.Err.(minio.ErrorResponse); ok && nErr.Code == "APINotSupported" {
+					if minio.ToErrorResponse(notificationInfo.Err).Code == "NotImplemented" {
 						perr = probe.NewError(APINotImplemented{
 							API:     "Watch",
 							APIType: c.GetURL().String(),
