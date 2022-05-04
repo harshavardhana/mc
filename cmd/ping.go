@@ -1,150 +1,340 @@
-// // Copyright (c) 2015-2021 MinIO, Inc.
-// //
-// // This file is part of MinIO Object Storage stack
-// //
-// // This program is free software: you can redistribute it and/or modify
-// // it under the terms of the GNU Affero General Public License as published by
-// // the Free Software Foundation, either version 3 of the License, or
-// // (at your option) any later version.
-// //
-// // This program is distributed in the hope that it will be useful
-// // but WITHOUT ANY WARRANTY; without even the implied warranty of
-// // MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-// // GNU Affero General Public License for more details.
-// //
-// // You should have received a copy of the GNU Affero General Public License
-// // along with this program.  If not, see <http://www.gnu.org/licenses/>.
+// Copyright (c) 2015-2022 MinIO, Inc.
+//
+// This file is part of MinIO Object Storage stack
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-// package cmd
+package cmd
 
-// import (
-// 	"context"
+import (
+	"context"
+	"fmt"
+	"os"
+	"sort"
+	"strconv"
+	"strings"
+	"time"
 
-// 	"github.com/fatih/color"
-// 	"github.com/minio/cli"
-// 	json "github.com/minio/colorjson"
-// 	"github.com/minio/mc/pkg/probe"
-// 	"github.com/minio/pkg/console"
-// )
+	"github.com/charmbracelet/bubbles/spinner"
+	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
+	"github.com/fatih/color"
+	"github.com/minio/cli"
+	json "github.com/minio/colorjson"
+	"github.com/minio/madmin-go"
+	"github.com/minio/mc/pkg/probe"
+	"github.com/minio/pkg/console"
+	"github.com/olekukonko/tablewriter"
+)
 
-// var pingFlags = []cli.Flag{
-// 	cli.IntFlag{
-// 		Name:  "count, c",
-// 		Usage: "will return liveliness for that count number of times and return.",
-// 	},
-// }
+const (
+	livelinessEndPoint = "/minio/health/live"
+	pingInterval       = time.Second // keep it similar to unix ping interval
+)
 
-// // return latency and liveness probe.
-// var pingCmd = cli.Command{
-// 	Name:         "ping",
-// 	Usage:        "will return latency and liveness probe",
-// 	Action:       mainMakeBucket,
-// 	Before:       setGlobalsFromContext,
-// 	OnUsageError: onUsageError,
-// 	Flags:        append(mbFlags, globalFlags...),
-// 	CustomHelpTemplate: `NAME:
-//   {{.HelpName}} - {{.Usage}}
+var pingFlags = []cli.Flag{
+	cli.IntFlag{
+		Name:  "count, c",
+		Usage: "will return liveliness for that count number of times and return.",
+		Value: 4,
+	},
+	cli.DurationFlag{
+		Name:  "interval, i",
+		Usage: "Wait interval between sending ping request",
+		Value: pingInterval,
+	},
+}
 
-// USAGE:
-//   {{.HelpName}} [FLAGS] TARGET [TARGET...]
-// {{if .VisibleFlags}}
-// FLAGS:
-//   {{range .VisibleFlags}}{{.}}
-//   {{end}}{{end}}
-// EXAMPLES:
-//   1. Create a bucket on Amazon S3 cloud storage.
-//      {{.Prompt}} {{.HelpName}} s3/mynewbucket
+// return latency and liveness probe.
+var pingCmd = cli.Command{
+	Name:            "ping",
+	Usage:           "will return latency and liveness probe",
+	Action:          mainPing,
+	Before:          setGlobalsFromContext,
+	OnUsageError:    onUsageError,
+	Flags:           append(pingFlags, globalFlags...),
+	HideHelpCommand: true,
+	CustomHelpTemplate: `NAME:
+  {{.HelpName}} - {{.Usage}}
 
-//   2. Create a new bucket on Google Cloud Storage.
-//      {{.Prompt}} {{.HelpName}} gcs/miniocloud
+USAGE:
+  {{.HelpName}} [FLAGS] TARGET [TARGET...]
+{{if .VisibleFlags}}
+FLAGS:
+  {{range .VisibleFlags}}{{.}}
+  {{end}}{{end}}
+EXAMPLES:
+  1. Return Latency and liveness probe.
+     {{.Prompt}} {{.HelpName}} myminio
 
-//   3. Create a new bucket on Amazon S3 cloud storage in region 'us-west-2'.
-//      {{.Prompt}} {{.HelpName}} --region=us-west-2 s3/myregionbucket
+  2. Return Latency and liveness probe 5 number of times.
+     {{.Prompt}} {{.HelpName}} --count 5 myminio
+`,
+}
 
-//   4. Create a new directory including its missing parents (equivalent to 'mkdir -p').
-//      {{.Prompt}} {{.HelpName}} /tmp/this/new/dir1
+// Validate command line arguments.
+func checkPingSyntax(cliCtx *cli.Context) {
+	if !cliCtx.Args().Present() {
+		cli.ShowCommandHelpAndExit(cliCtx, "ping", 1) // last argument is exit code
+	}
+}
 
-//   5. Create multiple directories including its missing parents (behavior similar to 'mkdir -p').
-//      {{.Prompt}} {{.HelpName}} /mnt/sdb/mydisk /mnt/sdc/mydisk /mnt/sdd/mydisk
+// PingResult is result for each ping
+type PingResult struct {
+	madmin.AliveResult
+}
 
-//   6. Ignore if bucket/directory already exists.
-//      {{.Prompt}} {{.HelpName}} --ignore-existing myminio/mynewbucket
+// PingResults is result for each ping for all hosts
+type PingResults struct {
+	Results map[string][]PingResult
+	Final   bool
+}
 
-//   7. Create a new bucket on Amazon S3 cloud storage in region 'us-west-2' with object lock enabled.
-//      {{.Prompt}} {{.HelpName}} --with-lock --region=us-west-2 s3/myregionbucket
-// `,
-// }
+// JSON jsonified ping result message.
+func (pr PingResult) JSON() string {
+	statusJSONBytes, e := json.MarshalIndent(pr, "", " ")
+	fatalIf(probe.NewError(e), "Unable to marshal into JSON.")
 
-// // makeBucketMessage is container for make bucket success and failure messages.
-// type makeBucketMessage struct {
-// 	Status string `json:"status"`
-// 	Bucket string `json:"bucket"`
-// 	Region string `json:"region"`
-// }
+	return string(statusJSONBytes)
+}
 
-// // String colorized make bucket message.
-// func (s makeBucketMessage) String() string {
-// 	return console.Colorize("MakeBucket", "Bucket created successfully `"+s.Bucket+"`.")
-// }
+// String colorized ping result message.
+func (pr PingResult) String() (msg string) {
+	if pr.Error == nil {
+		coloredDot := console.Colorize("Info", dot)
+		// Print server title
+		msg += fmt.Sprintf("%s %s:", coloredDot, console.Colorize("PrintB", pr.Endpoint.String()))
+		msg += fmt.Sprintf(" time=%s\n", pr.ResponseTime)
+		return
+	}
+	coloredDot := console.Colorize("InfoFail", dot)
+	msg += fmt.Sprintf("%s %s:", coloredDot, console.Colorize("PrintB", pr.Endpoint.String()))
+	msg += fmt.Sprintf(" time=%s, error=%s\n", pr.ResponseTime, console.Colorize("InfoFail", pr.Error.Error()))
 
-// // JSON jsonified make bucket message.
-// func (s makeBucketMessage) JSON() string {
-// 	makeBucketJSONBytes, e := json.MarshalIndent(s, "", " ")
-// 	fatalIf(probe.NewError(e), "Unable to marshal into JSON.")
+	return msg
+}
 
-// 	return string(makeBucketJSONBytes)
-// }
+type pingUI struct {
+	spinner  spinner.Model
+	quitting bool
+	results  PingResults
+}
 
-// // Validate command line arguments.
-// func checkMakeBucketSyntax(cliCtx *cli.Context) {
-// 	if !cliCtx.Args().Present() {
-// 		cli.ShowCommandHelpAndExit(cliCtx, "mb", 1) // last argument is exit code
-// 	}
-// }
+func initPingUI() *pingUI {
+	s := spinner.New()
+	s.Spinner = spinner.Points
+	s.Style = lipgloss.NewStyle().Foreground(lipgloss.Color("205"))
+	return &pingUI{
+		spinner: s,
+	}
+}
 
-// // mainMakeBucket is entry point for mb command.
-// func mainMakeBucket(cli *cli.Context) error {
-// 	// check 'mb' cli arguments.
-// 	checkMakeBucketSyntax(cli)
+func (m *pingUI) Init() tea.Cmd {
+	return m.spinner.Tick
+}
 
-// 	// Additional command speific theme customization.
-// 	console.SetColor("MakeBucket", color.New(color.FgGreen, color.Bold))
+func (m *pingUI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	switch msg := msg.(type) {
+	case tea.KeyMsg:
+		switch msg.String() {
+		case "ctrl+c":
+			m.quitting = true
+			return m, tea.Quit
+		default:
+			return m, nil
+		}
+	case PingResults:
+		m.results = msg
+		if msg.Final {
+			m.quitting = true
+			return m, tea.Quit
+		}
+		return m, nil
+	case spinner.TickMsg:
+		var cmd tea.Cmd
+		m.spinner, cmd = m.spinner.Update(msg)
+		return m, cmd
+	default:
+		return m, nil
+	}
+}
 
-// 	// Save region.
-// 	region := cli.String("region")
-// 	ignoreExisting := cli.Bool("p")
-// 	withLock := cli.Bool("l")
+func (m *pingUI) View() string {
+	var s strings.Builder
 
-// 	var cErr error
-// 	for _, targetURL := range cli.Args() {
-// 		// Instantiate client for URL.
-// 		clnt, err := newClient(targetURL)
-// 		if err != nil {
-// 			errorIf(err.Trace(targetURL), "Invalid target `"+targetURL+"`.")
-// 			cErr = exitStatus(globalErrorExitStatus)
-// 			continue
-// 		}
+	// Set table header
+	table := tablewriter.NewWriter(&s)
+	table.SetAutoWrapText(false)
+	table.SetAutoFormatHeaders(true)
+	table.SetHeaderAlignment(tablewriter.ALIGN_LEFT)
+	table.SetAlignment(tablewriter.ALIGN_LEFT)
+	table.SetCenterSeparator("")
+	table.SetColumnSeparator("")
+	table.SetRowSeparator("")
+	table.SetHeaderLine(false)
+	table.SetBorder(false)
+	table.SetTablePadding("\t") // pad with tabs
+	table.SetNoWhiteSpace(true)
 
-// 		ctx, cancelMakeBucket := context.WithCancel(globalContext)
-// 		defer cancelMakeBucket()
+	res := m.results
 
-// 		// Make bucket.
-// 		err = clnt.MakeBucket(ctx, region, ignoreExisting, withLock)
-// 		if err != nil {
-// 			switch err.ToGoError().(type) {
-// 			case BucketNameEmpty:
-// 				errorIf(err.Trace(targetURL), "Unable to make bucket, please use `mc mb %s/<your-bucket-name>`.", targetURL)
-// 			case BucketNameTopLevel:
-// 				errorIf(err.Trace(targetURL), "Unable to make prefix, please use `mc mb %s/`.", targetURL)
-// 			default:
-// 				errorIf(err.Trace(targetURL), "Unable to make bucket `"+targetURL+"`.")
-// 			}
-// 			cErr = exitStatus(globalErrorExitStatus)
-// 			continue
-// 		}
+	if len(res.Results) > 0 {
+		s.WriteString("\n")
+	}
 
-// 		// Successfully created a bucket.
-// 		printMsg(makeBucketMessage{Status: "success", Bucket: targetURL})
-// 	}
-// 	return cErr
-// }
+	trailerIfGreaterThan := func(in string, max int) string {
+		if len(in) < max {
+			return in
+		}
+		return in[:max] + "..."
+	}
+
+	table.SetHeader([]string{"Node", "Avg-Latency", "Count", ""})
+	data := make([][]string, 0, len(res.Results))
+
+	if len(res.Results) == 0 {
+		data = append(data, []string{
+			"...",
+			whiteStyle.Render("-- ms"),
+			whiteStyle.Render("--"),
+			"",
+		})
+	} else {
+		for k, results := range res.Results {
+			data = append(data, []string{
+				trailerIfGreaterThan(k, 64),
+				getAvgLatency(results...).String(),
+				strconv.Itoa(len(results)),
+				"",
+			})
+		}
+
+		sort.Slice(data, func(i, j int) bool {
+			return data[i][0] < data[j][0]
+		})
+
+		table.AppendBulk(data)
+		table.Render()
+	}
+	if !m.quitting {
+		s.WriteString(fmt.Sprintf("\nPinging: %s", m.spinner.View()))
+	} else {
+		s.WriteString("\n")
+	}
+	return s.String()
+}
+
+func getAvgLatency(results ...PingResult) (avg time.Duration) {
+	if len(results) == 0 {
+		return avg
+	}
+	var totalDurationNS uint64
+	for _, result := range results {
+		totalDurationNS += uint64(result.ResponseTime.Nanoseconds())
+	}
+	return time.Duration(totalDurationNS / uint64(len(results)))
+}
+
+func fetchAdminInfo(admClnt *madmin.AdminClient) (madmin.InfoMessage, error) {
+	timer := time.NewTimer(time.Second)
+	defer timer.Stop()
+
+	for {
+		select {
+		case <-globalContext.Done():
+			return madmin.InfoMessage{}, globalContext.Err()
+		case <-timer.C:
+			ctx, cancel := context.WithTimeout(globalContext, 3*time.Second)
+			// Fetch the service status of the specified MinIO server
+			info, e := admClnt.ServerInfo(ctx)
+			cancel()
+			if e == nil {
+				return info, nil
+			}
+
+			timer.Reset(time.Second)
+		}
+	}
+}
+
+// mainPing is entry point for ping command.
+func mainPing(cliCtx *cli.Context) error {
+	// check 'ping' cli arguments.
+	checkPingSyntax(cliCtx)
+
+	console.SetColor("Info", color.New(color.FgGreen, color.Bold))
+	console.SetColor("InfoFail", color.New(color.FgRed, color.Bold))
+
+	ctx, cancel := context.WithCancel(globalContext)
+	defer cancel()
+
+	aliasedURL := cliCtx.Args().Get(0)
+
+	count := cliCtx.Int("count")
+	if count < 1 {
+		fatalIf(errInvalidArgument().Trace(cliCtx.Args()...), "ping count cannot be less than 1")
+	}
+
+	interval := cliCtx.Duration("interval")
+
+	admClient, err := newAdminClient(aliasedURL)
+	fatalIf(err.Trace(aliasedURL), "Unable to initialize admin client for `"+aliasedURL+"`.")
+
+	anonClient, err := newAnonymousClient(aliasedURL)
+	fatalIf(err.Trace(aliasedURL), "Unable to initialize anonymous client for `"+aliasedURL+"`.")
+
+	done := make(chan struct{})
+
+	ui := tea.NewProgram(initPingUI())
+	if !globalJSON {
+		go func() {
+			if e := ui.Start(); e != nil {
+				cancel()
+				os.Exit(1)
+			}
+			close(done)
+		}()
+	}
+
+	admInfo, e := fetchAdminInfo(admClient)
+	fatalIf(probe.NewError(e).Trace(aliasedURL), "Unable to get server info")
+
+	pingResults := PingResults{
+		Results: make(map[string][]PingResult),
+	}
+	for i := 0; i < count; i++ {
+		for result := range anonClient.Alive(ctx, madmin.AliveOpts{}, admInfo.Servers...) {
+			if globalJSON {
+				printMsg(PingResult{result})
+			} else {
+				hostResults, ok := pingResults.Results[result.Endpoint.Host]
+				if !ok {
+					pingResults.Results[result.Endpoint.Host] = []PingResult{PingResult{result}}
+				} else {
+					hostResults = append(hostResults, PingResult{result})
+					pingResults.Results[result.Endpoint.Host] = hostResults
+				}
+				ui.Send(pingResults)
+			}
+		}
+		time.Sleep(interval)
+	}
+	if !globalJSON {
+		pingResults.Final = true
+		ui.Send(pingResults)
+
+		<-done
+	}
+	return nil
+}
